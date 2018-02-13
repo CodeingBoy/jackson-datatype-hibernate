@@ -1,10 +1,5 @@
 package com.fasterxml.jackson.datatype.hibernate5;
 
-import java.io.IOException;
-import java.util.*;
-
-import javax.persistence.*;
-
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.jsonFormatVisitors.JsonFormatVisitorWrapper;
@@ -14,7 +9,6 @@ import com.fasterxml.jackson.databind.ser.ContextualSerializer;
 import com.fasterxml.jackson.databind.ser.ResolvableSerializer;
 import com.fasterxml.jackson.databind.util.NameTransformer;
 import com.fasterxml.jackson.datatype.hibernate5.Hibernate5Module.Feature;
-
 import org.hibernate.FlushMode;
 import org.hibernate.Hibernate;
 import org.hibernate.Session;
@@ -25,15 +19,20 @@ import org.hibernate.engine.spi.SessionFactoryImplementor;
 import org.hibernate.engine.spi.SessionImplementor;
 import org.hibernate.mapping.Bag;
 
+import javax.persistence.*;
+import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.*;
+
 /**
  * Wrapper serializer used to handle aspects of lazy loading that can be used
  * for Hibernate collection datatypes; which includes both <code>Collection</code>
  * and <code>Map</code> types (unlike in JDK).
  */
 public class PersistentCollectionSerializer
-    extends ContainerSerializer<Object>
-    implements ContextualSerializer, ResolvableSerializer
-{
+        extends ContainerSerializer<Object>
+        implements ContextualSerializer, ResolvableSerializer {
     private static final long serialVersionUID = 1L; // since 2.7
 
     /**
@@ -56,6 +55,8 @@ public class PersistentCollectionSerializer
 
     protected final SessionFactory _sessionFactory;
 
+    protected final Method _collectionSessionInitMethod;
+
     /*
     /**********************************************************************
     /* Life cycle
@@ -64,32 +65,47 @@ public class PersistentCollectionSerializer
 
     @SuppressWarnings("unchecked")
     public PersistentCollectionSerializer(JavaType containerType,
-            JsonSerializer<?> serializer, int features, SessionFactory sessionFactory) {
+                                          JsonSerializer<?> serializer, int features, SessionFactory sessionFactory) {
         super(containerType);
         _originalType = containerType;
         _serializer = (JsonSerializer<Object>) serializer;
         _features = features;
         _sessionFactory = sessionFactory;
+        _collectionSessionInitMethod = initCollMethod();
     }
 
     /**
      * @since 2.7
      */
     @SuppressWarnings("unchecked")
-    protected PersistentCollectionSerializer(PersistentCollectionSerializer base, JsonSerializer<?> serializer)
-    {
+    protected PersistentCollectionSerializer(PersistentCollectionSerializer base, JsonSerializer<?> serializer) {
         super(base);
         _originalType = base._originalType;
         _serializer = (JsonSerializer<Object>) serializer;
         _features = base._features;
         _sessionFactory = base._sessionFactory;
+        _collectionSessionInitMethod = initCollMethod();
+    }
+
+    protected Method initCollMethod() {
+        try {
+            Class<?> cl = SessionFactory.class.getClassLoader().loadClass("org.hibernate.collection.spi.PersistentCollection");
+            for (Method m : cl.getMethods()) {
+                if (m.getName().equals("setCurrentSession")) {
+                    return m;
+                }
+            }
+        } catch (ClassNotFoundException ex) {
+            throw new IllegalStateException("Hibernate version is incompatible for lazy collection serialization", ex);
+        }
+        throw new IllegalStateException("Hibernate version is incompatible for lazy collection serialization");
     }
 
     @Override
     public PersistentCollectionSerializer unwrappingSerializer(NameTransformer unwrapper) {
         return _withSerializer(_serializer.unwrappingSerializer(unwrapper));
     }
-    
+
     protected PersistentCollectionSerializer _withSerializer(JsonSerializer<?> ser) {
         if ((ser == _serializer) || (ser == null)) {
             return this;
@@ -99,8 +115,7 @@ public class PersistentCollectionSerializer
 
     // from `ContainerSerializer`
     @Override
-    protected ContainerSerializer<?> _withValueTypeSerializer(TypeSerializer vts)
-    {
+    protected ContainerSerializer<?> _withValueTypeSerializer(TypeSerializer vts) {
         ContainerSerializer<?> ser0 = _containerSerializer();
         if (ser0 != null) {
             return _withSerializer(ser0.withValueTypeSerializer(vts));
@@ -118,8 +133,7 @@ public class PersistentCollectionSerializer
      */
 
     @Override
-    public void resolve(SerializerProvider provider) throws JsonMappingException
-    {
+    public void resolve(SerializerProvider provider) throws JsonMappingException {
         if (_serializer instanceof ResolvableSerializer) {
             ((ResolvableSerializer) _serializer).resolve(provider);
         }
@@ -131,9 +145,8 @@ public class PersistentCollectionSerializer
      */
     @Override
     public JsonSerializer<?> createContextual(SerializerProvider provider,
-            BeanProperty property)
-        throws JsonMappingException
-    {
+                                              BeanProperty property)
+            throws JsonMappingException {
         // 18-Oct-2013, tatu: Whether this is for the primary property or secondary is
         //   not quite certain; presume primary one for now.
         JsonSerializer<?> ser = provider.handlePrimaryContextualization(_serializer, property);
@@ -152,8 +165,7 @@ public class PersistentCollectionSerializer
      */
 
     @Override // since 2.6
-    public boolean isEmpty(SerializerProvider provider, Object value)
-    {
+    public boolean isEmpty(SerializerProvider provider, Object value) {
         if (value == null) { // is null ever passed?
             return true;
         }
@@ -176,8 +188,7 @@ public class PersistentCollectionSerializer
 
     @Override
     public void acceptJsonFormatVisitor(JsonFormatVisitorWrapper visitor, JavaType typeHint)
-        throws JsonMappingException
-    {
+            throws JsonMappingException {
         _serializer.acceptJsonFormatVisitor(visitor, typeHint);
     }
 
@@ -211,8 +222,8 @@ public class PersistentCollectionSerializer
         if (value instanceof Collection<?>) {
             return ((Collection<?>) value).size() == 1;
         }
-        if (value instanceof Map<?,?>) {
-            return ((Map<?,?>) value).size() == 1;
+        if (value instanceof Map<?, ?>) {
+            return ((Map<?, ?>) value).size() == 1;
         }
         return false;
     }
@@ -225,8 +236,7 @@ public class PersistentCollectionSerializer
 
     @Override
     public void serialize(Object value, JsonGenerator g, SerializerProvider provider)
-        throws IOException
-    {
+            throws IOException {
         if (value instanceof PersistentCollection) {
             value = findLazyValue((PersistentCollection) value);
             if (value == null) {
@@ -245,9 +255,8 @@ public class PersistentCollectionSerializer
 
     @Override
     public void serializeWithType(Object value, JsonGenerator g, SerializerProvider provider,
-            TypeSerializer typeSer)
-        throws IOException
-    {
+                                  TypeSerializer typeSer)
+            throws IOException {
         if (value instanceof PersistentCollection) {
             value = findLazyValue((PersistentCollection) value);
             if (value == null) {
@@ -261,7 +270,7 @@ public class PersistentCollectionSerializer
 
         // 30-Jul-2016, tatu: wrt [datatype-hibernate#93], conversion IS needed here (or,
         //    if we could figure out, type id)
-        
+
         // !!! TODO: figure out how to replace type id without having to replace collection
         if (Feature.REPLACE_PERSISTENT_COLLECTIONS.enabledIn(_features)) {
             value = convertToJavaCollection(value); // Strip PersistentCollection
@@ -281,7 +290,7 @@ public class PersistentCollectionSerializer
         }
         return null;
     }
-    
+
     protected Object findLazyValue(PersistentCollection coll) {
         // If lazy-loaded, not yet loaded, may serialize as null?
         if (!Feature.FORCE_LAZY_LOADING.enabledIn(_features) && !coll.wasInitialized()) {
@@ -326,7 +335,12 @@ public class PersistentCollectionSerializer
             session.beginTransaction();
         }
 
-        coll.setCurrentSession(((SessionImplementor) session));
+//        coll.setCurrentSession(((SessionImplementor) session));
+        try {
+            _collectionSessionInitMethod.invoke(coll, session);
+        } catch (IllegalAccessException | IllegalArgumentException | InvocationTargetException ex) {
+            throw new IllegalStateException("Hibernate version is incompatible for lazy collection serialization", ex);
+        }
         Hibernate.initialize(coll);
 
         if (!isJTA) {
@@ -346,7 +360,7 @@ public class PersistentCollectionSerializer
             if (ec != null) {
                 return (ec.fetch() == FetchType.LAZY);
             }
-            OneToMany ann1 = property.getAnnotation(OneToMany.class);
+            javax.persistence.OneToMany ann1 = property.getAnnotation(javax.persistence.OneToMany.class);
             if (ann1 != null) {
                 return (ann1.fetch() == FetchType.LAZY);
             }
@@ -400,7 +414,7 @@ public class PersistentCollectionSerializer
     private Object convertToSet(Set<?> value) {
         return new HashSet<>(value);
     }
-    
+
     protected static class SessionReader {
         public static boolean isJTA(Session session) {
             try {
